@@ -265,14 +265,53 @@ configure_monitoring() {
     if prompt_yes_no "Enable checksum verification?" "y"; then
         ENABLE_CHECKSUM="true"
 
+        # Checksum algorithm selection
+        echo ""
+        print_info "AWS Additional Checksums - Algorithm Selection:"
+        print_info "  CRC64NVME - AWS default (Dec 2024), fastest, hardware-accelerated (recommended)"
+        print_info "  CRC32C    - Hardware-accelerated on Intel CPUs (SSE 4.2)"
+        print_info "  CRC32     - Standard CRC32, widely compatible"
+        print_info "  SHA256    - Cryptographic hash for compliance/audit requirements"
+        print_info "  SHA1      - Legacy cryptographic hash (not recommended)"
+        print_info "  NONE      - Disable AWS checksums (not recommended)"
+        echo ""
+        print_info "Performance: CRC algorithms are ~12x faster than SHA256"
+        print_info "Recommendation: CRC64NVME for best performance"
+        echo ""
+
+        CHECKSUM_ALGORITHM=$(prompt_input "Checksum algorithm [CRC64NVME/CRC32C/CRC32/SHA256/SHA1/NONE]" "CRC64NVME")
+
+        # Normalize algorithm name to uppercase
+        CHECKSUM_ALGORITHM=$(echo "$CHECKSUM_ALGORITHM" | tr '[:lower:]' '[:upper:]')
+
+        # Validate algorithm
+        case "$CHECKSUM_ALGORITHM" in
+            CRC64NVME|CRC64|CRC32C|CRC32|SHA256|SHA1|NONE)
+                # Valid - normalize CRC64 to CRC64NVME
+                if [ "$CHECKSUM_ALGORITHM" = "CRC64" ]; then
+                    CHECKSUM_ALGORITHM="CRC64NVME"
+                fi
+                print_success "Selected algorithm: $CHECKSUM_ALGORITHM"
+                ;;
+            *)
+                print_warning "Invalid algorithm '$CHECKSUM_ALGORITHM', defaulting to CRC64NVME"
+                CHECKSUM_ALGORITHM="CRC64NVME"
+                ;;
+        esac
+
+        echo ""
+        print_warning "⚠️  LEGACY VERIFICATION (DEPRECATED)"
         print_warning "Post-upload verification downloads all files from S3 (slow/costly)"
-        if prompt_yes_no "Enable automatic post-upload verification?" "n"; then
+        print_warning "AWS Additional Checksums provide server-side validation (recommended)"
+        if prompt_yes_no "Enable legacy post-upload verification?" "n"; then
             VERIFY_AFTER_UPLOAD="true"
+            print_warning "⚠️  Legacy verification enabled - this will download files from S3"
         else
             VERIFY_AFTER_UPLOAD="false"
         fi
     else
         ENABLE_CHECKSUM="false"
+        CHECKSUM_ALGORITHM="NONE"
         VERIFY_AFTER_UPLOAD="false"
     fi
 
@@ -333,6 +372,7 @@ generate_config() {
     sed -i "s|\[ALERT_EMAIL\]|$ALERT_EMAIL|g" "$config_file"
     sed -i "s|\[SNS_TOPIC_ARN\]|$SNS_TOPIC_ARN|g" "$config_file"
     sed -i "s|ENABLE_CHECKSUM_VERIFICATION=\"true\"|ENABLE_CHECKSUM_VERIFICATION=\"$ENABLE_CHECKSUM\"|g" "$config_file"
+    sed -i "s|CHECKSUM_ALGORITHM=\"CRC64NVME\"|CHECKSUM_ALGORITHM=\"$CHECKSUM_ALGORITHM\"|g" "$config_file"
     sed -i "s|VERIFY_AFTER_UPLOAD=\"false\"|VERIFY_AFTER_UPLOAD=\"$VERIFY_AFTER_UPLOAD\"|g" "$config_file"
 
     print_success "Configuration file created: $config_file"
@@ -791,7 +831,8 @@ Local Directories:
 
 Features:
   Checksum Verification: $ENABLE_CHECKSUM
-  Post-Upload Verification: $VERIFY_AFTER_UPLOAD
+  Checksum Algorithm: $CHECKSUM_ALGORITHM
+  Legacy Post-Upload Verification: $VERIFY_AFTER_UPLOAD
   Email Alerts: $ENABLE_ALERTS
   Monitor Interval: ${MONITOR_CHECK_INTERVAL}s
 
