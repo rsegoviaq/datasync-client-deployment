@@ -1,0 +1,30 @@
+# Generated deployment packages
+packages/*
+!packages/.gitkeep
+
+# Logs
+*.log
+logs/
+
+# Configuration files with credentials
+*-config.env
+datasync-config.env
+
+# Temporary files
+*.tmp
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.sublime-*
+
+# Backup files
+*.bak
+*.backup
