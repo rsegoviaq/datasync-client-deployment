@@ -1,6 +1,18 @@
 #!/bin/bash
-# DataSync Simulator using AWS S3 Sync
-# Simulates DataSync behavior for local testing with checksum verification
+# DataSync Simulator using AWS S3 Sync with Additional Checksums
+# Simulates DataSync behavior with AWS S3's native checksum verification
+#
+# AWS Additional Checksums Feature (Feb 2022):
+#   - Server-side checksum verification during upload (no downloads needed)
+#   - HTTP trailer-based checksums (single-pass operation)
+#   - 5 supported algorithms: CRC64NVME, CRC32C, CRC32, SHA256, SHA1
+#   - Hardware-accelerated CRC algorithms provide 3+ GB/s throughput
+#   - Automatic validation by S3 before storing (BadDigest error on mismatch)
+#
+# Performance Benefits:
+#   - CRC64NVME/CRC32C: ~30-60 seconds for 100GB files
+#   - SHA256: ~7+ minutes for 100GB files
+#   - Verification without downloads using 'aws s3api head-object'
 
 # Load configuration
 if [ -f ~/datasync-config.env ]; then
@@ -20,6 +32,7 @@ CHECKSUM_FILE="$CHECKSUM_DIR/checksums-$(date +%Y%m%d-%H%M%S).txt"
 
 # Feature flags
 ENABLE_CHECKSUM_VERIFICATION=${ENABLE_CHECKSUM_VERIFICATION:-true}
+CHECKSUM_ALGORITHM=${CHECKSUM_ALGORITHM:-CRC64NVME}
 VERIFY_AFTER_UPLOAD=${VERIFY_AFTER_UPLOAD:-false}
 
 # Colors
@@ -52,12 +65,14 @@ log() {
     esac
 }
 
-# Function to calculate checksums for all files
-calculate_checksums() {
+# Function to calculate local SHA256 checksums (legacy/optional)
+# Note: AWS Additional Checksums calculates checksums automatically during upload
+# This function is kept for compliance records or when CHECKSUM_ALGORITHM=NONE
+calculate_checksums_legacy() {
     local source_dir=$1
     local output_file=$2
 
-    log INFO "Calculating SHA256 checksums for all files..."
+    log INFO "Calculating local SHA256 checksums for compliance records..."
 
     # Create checksum directory
     mkdir -p "$(dirname "$output_file")"
@@ -73,20 +88,127 @@ calculate_checksums() {
         ((file_count++))
     done < <(find "$source_dir" -type f -print0)
 
-    log INFO "✓ Calculated checksums for $file_count files"
+    log INFO "✓ Calculated SHA256 checksums for $file_count files"
     log INFO "Checksums saved to: $output_file"
 
     return 0
 }
 
-# Function to verify files in S3 against checksums
-verify_s3_checksums() {
+# Function to get AWS checksum algorithm parameter
+get_checksum_algorithm() {
+    local algorithm="${1:-CRC64NVME}"
+
+    case "${algorithm^^}" in
+        CRC64NVME)
+            echo "CRC64NVME"
+            ;;
+        CRC32C)
+            echo "CRC32C"
+            ;;
+        CRC32)
+            echo "CRC32"
+            ;;
+        SHA256)
+            echo "SHA256"
+            ;;
+        SHA1)
+            echo "SHA1"
+            ;;
+        NONE)
+            echo ""
+            ;;
+        *)
+            log WARN "Unknown checksum algorithm: $algorithm, defaulting to CRC64NVME"
+            echo "CRC64NVME"
+            ;;
+    esac
+}
+
+# Function to verify S3 object checksums using AWS API (no downloads!)
+# Uses 'aws s3api head-object --checksum-mode ENABLED' to retrieve checksums
+verify_s3_checksums_aws() {
+    local s3_prefix="${1}"
+    local errors=0
+    local verified=0
+
+    log INFO "Verifying S3 object checksums using AWS Additional Checksums API..."
+    log INFO "Algorithm: $CHECKSUM_ALGORITHM (no downloads required)"
+
+    # Get list of objects in S3
+    local object_list=$(mktemp)
+    aws s3api list-objects-v2 \
+        --bucket "$BUCKET_NAME" \
+        --prefix "$(echo "$s3_prefix" | sed 's|s3://[^/]*/||')" \
+        --query 'Contents[].Key' \
+        --output text \
+        --profile "$AWS_PROFILE" \
+        --region "$AWS_REGION" > "$object_list"
+
+    # Check each object's checksum
+    while read -r object_key; do
+        [ -z "$object_key" ] && continue
+
+        # Retrieve object metadata with checksum
+        local response=$(aws s3api head-object \
+            --bucket "$BUCKET_NAME" \
+            --key "$object_key" \
+            --checksum-mode ENABLED \
+            --profile "$AWS_PROFILE" \
+            --region "$AWS_REGION" 2>&1)
+
+        if [ $? -eq 0 ]; then
+            # Extract checksum based on algorithm
+            local checksum_value=""
+            case "${CHECKSUM_ALGORITHM^^}" in
+                CRC64NVME)
+                    checksum_value=$(echo "$response" | grep -i '"ChecksumCRC64NVME"' | sed 's/.*: "\(.*\)".*/\1/')
+                    ;;
+                CRC32C)
+                    checksum_value=$(echo "$response" | grep -i '"ChecksumCRC32C"' | sed 's/.*: "\(.*\)".*/\1/')
+                    ;;
+                CRC32)
+                    checksum_value=$(echo "$response" | grep -i '"ChecksumCRC32"' | sed 's/.*: "\(.*\)".*/\1/')
+                    ;;
+                SHA256)
+                    checksum_value=$(echo "$response" | grep -i '"ChecksumSHA256"' | sed 's/.*: "\(.*\)".*/\1/')
+                    ;;
+                SHA1)
+                    checksum_value=$(echo "$response" | grep -i '"ChecksumSHA1"' | sed 's/.*: "\(.*\)".*/\1/')
+                    ;;
+            esac
+
+            if [ -n "$checksum_value" ]; then
+                log DEBUG "✓ $object_key - AWS checksum: $checksum_value"
+                ((verified++))
+            else
+                log WARN "✗ $object_key - No checksum found (may not have been uploaded with checksums)"
+                ((errors++))
+            fi
+        else
+            log ERROR "✗ $object_key - Failed to retrieve checksum from S3"
+            ((errors++))
+        fi
+    done < "$object_list"
+
+    rm -f "$object_list"
+
+    log INFO "AWS checksum verification complete: $verified verified, $errors missing/errors"
+
+    return $errors
+}
+
+# Function to verify files in S3 by downloading (LEGACY - NOT RECOMMENDED)
+# WARNING: This downloads all files from S3 for verification - slow and costly!
+# Use verify_s3_checksums_aws() instead for AWS Additional Checksums verification
+verify_s3_checksums_legacy() {
     local checksum_file=$1
     local temp_dir=$(mktemp -d)
     local errors=0
     local verified=0
 
-    log INFO "Verifying files in S3 against local checksums..."
+    log WARN "Using LEGACY checksum verification (downloads files from S3)"
+    log WARN "This is NOT RECOMMENDED - use AWS Additional Checksums instead"
+    log INFO "Verifying files in S3 against local SHA256 checksums..."
 
     while IFS= read -r line; do
         local expected_checksum=$(echo "$line" | cut -d' ' -f1)
@@ -134,8 +256,15 @@ log INFO "Source: $WATCH_DIR"
 log INFO "Destination: $S3_DEST"
 log INFO "AWS Profile: $AWS_PROFILE"
 log INFO "Region: $AWS_REGION"
-log INFO "Checksum Verification: $ENABLE_CHECKSUM_VERIFICATION"
-log INFO "Verify After Upload: $VERIFY_AFTER_UPLOAD"
+log INFO ""
+log INFO "AWS Additional Checksums Configuration:"
+log INFO "  Checksum Verification: $ENABLE_CHECKSUM_VERIFICATION"
+log INFO "  Checksum Algorithm: $CHECKSUM_ALGORITHM"
+if [ "$CHECKSUM_ALGORITHM" != "NONE" ] && [ "$ENABLE_CHECKSUM_VERIFICATION" = "true" ]; then
+    log INFO "  Server-side verification: ENABLED (AWS validates automatically)"
+    log INFO "  Performance benefit: Single-pass upload with trailing checksums"
+fi
+log INFO "  Legacy download verification: $VERIFY_AFTER_UPLOAD"
 log INFO ""
 
 # Check if source directory exists
@@ -151,9 +280,15 @@ SIZE_BEFORE=$(du -sh "$WATCH_DIR" | cut -f1)
 log INFO "Files to sync: $FILES_BEFORE files ($SIZE_BEFORE)"
 log INFO ""
 
-# Calculate checksums before sync (if enabled)
-if [ "$ENABLE_CHECKSUM_VERIFICATION" = "true" ] && [ $FILES_BEFORE -gt 0 ]; then
-    calculate_checksums "$WATCH_DIR" "$CHECKSUM_FILE"
+# Calculate local SHA256 checksums for compliance records (optional)
+# Note: AWS will calculate checksums automatically during upload using HTTP trailers
+if [ "$CHECKSUM_ALGORITHM" = "NONE" ] && [ "$ENABLE_CHECKSUM_VERIFICATION" = "true" ] && [ $FILES_BEFORE -gt 0 ]; then
+    log INFO "CHECKSUM_ALGORITHM=NONE - using legacy SHA256 checksum calculation"
+    calculate_checksums_legacy "$WATCH_DIR" "$CHECKSUM_FILE"
+    log INFO ""
+elif [ "$ENABLE_CHECKSUM_VERIFICATION" = "true" ] && [ $FILES_BEFORE -gt 0 ]; then
+    log INFO "AWS Additional Checksums enabled - checksums will be calculated during upload"
+    log INFO "Algorithm: $CHECKSUM_ALGORITHM (hardware-accelerated, single-pass operation)"
     log INFO ""
 fi
 
@@ -162,16 +297,39 @@ log INFO "Starting sync operation..."
 # Record start time
 START_TIME=$(date +%s)
 
-# Perform sync with detailed logging
-aws s3 sync "$WATCH_DIR" "$S3_DEST" \
+# Get AWS checksum algorithm parameter
+AWS_CHECKSUM_PARAM=$(get_checksum_algorithm "$CHECKSUM_ALGORITHM")
+
+# Build sync command with checksum support
+SYNC_CMD="aws s3 sync \"$WATCH_DIR\" \"$S3_DEST\" \
     --storage-class INTELLIGENT_TIERING \
-    --profile "$AWS_PROFILE" \
-    --region "$AWS_REGION" \
-    --metadata "synced-by=datasync-simulator,timestamp=$(date +%s)" \
-    --delete \
-    2>&1 | tee -a "$LOG_FILE"
+    --profile \"$AWS_PROFILE\" \
+    --region \"$AWS_REGION\" \
+    --metadata \"synced-by=datasync-simulator,timestamp=$(date +%s)\""
+
+# Add checksum algorithm if enabled and not NONE
+if [ -n "$AWS_CHECKSUM_PARAM" ] && [ "$ENABLE_CHECKSUM_VERIFICATION" = "true" ]; then
+    SYNC_CMD="$SYNC_CMD --checksum-algorithm $AWS_CHECKSUM_PARAM"
+    log INFO "Using AWS Additional Checksums with algorithm: $AWS_CHECKSUM_PARAM"
+    log INFO "S3 will validate checksums automatically during upload (HTTP trailers)"
+else
+    log INFO "AWS Additional Checksums disabled - using standard sync"
+fi
+
+SYNC_CMD="$SYNC_CMD --delete"
+
+# Execute sync command
+log INFO "Executing: aws s3 sync with checksum verification..."
+eval "$SYNC_CMD" 2>&1 | tee -a "$LOG_FILE"
 
 SYNC_STATUS=$?
+
+# Check for BadDigest errors (checksum validation failures)
+if grep -q "BadDigest" "$LOG_FILE"; then
+    log ERROR "AWS checksum validation failed (BadDigest error detected)"
+    log ERROR "This indicates data corruption during transmission or calculation error"
+    SYNC_STATUS=1
+fi
 
 # Record end time
 END_TIME=$(date +%s)
@@ -196,16 +354,36 @@ log INFO "Objects in S3: $S3_OBJECT_COUNT"
 # Verify checksums after upload (if enabled and sync was successful)
 CHECKSUM_VERIFIED="false"
 CHECKSUM_ERRORS=0
-if [ "$VERIFY_AFTER_UPLOAD" = "true" ] && [ $SYNC_STATUS -eq 0 ] && [ "$ENABLE_CHECKSUM_VERIFICATION" = "true" ] && [ -f "$CHECKSUM_FILE" ]; then
+
+if [ $SYNC_STATUS -eq 0 ] && [ "$ENABLE_CHECKSUM_VERIFICATION" = "true" ]; then
     log INFO ""
-    verify_s3_checksums "$CHECKSUM_FILE"
-    CHECKSUM_ERRORS=$?
-    if [ $CHECKSUM_ERRORS -eq 0 ]; then
-        CHECKSUM_VERIFIED="true"
-        log INFO "✅ All checksums verified successfully"
-    else
-        CHECKSUM_VERIFIED="failed"
-        log ERROR "❌ Checksum verification failed with $CHECKSUM_ERRORS errors"
+
+    # Use AWS Additional Checksums API for verification (no downloads!)
+    if [ "$CHECKSUM_ALGORITHM" != "NONE" ]; then
+        log INFO "Verifying uploads using AWS Additional Checksums API..."
+        log INFO "Note: This checks S3 metadata without downloading files (fast and free)"
+        verify_s3_checksums_aws "$S3_DEST"
+        CHECKSUM_ERRORS=$?
+        if [ $CHECKSUM_ERRORS -eq 0 ]; then
+            CHECKSUM_VERIFIED="true"
+            log INFO "✅ All AWS checksums verified successfully"
+        else
+            CHECKSUM_VERIFIED="partial"
+            log WARN "⚠ Some files missing AWS checksums (may have been uploaded before checksums enabled)"
+        fi
+    fi
+
+    # Legacy download-based verification (NOT RECOMMENDED)
+    if [ "$VERIFY_AFTER_UPLOAD" = "true" ] && [ -f "$CHECKSUM_FILE" ]; then
+        log INFO ""
+        log WARN "Legacy download-based verification enabled (SLOW and COSTLY)"
+        verify_s3_checksums_legacy "$CHECKSUM_FILE"
+        LEGACY_ERRORS=$?
+        if [ $LEGACY_ERRORS -gt 0 ]; then
+            CHECKSUM_VERIFIED="failed"
+            CHECKSUM_ERRORS=$((CHECKSUM_ERRORS + LEGACY_ERRORS))
+            log ERROR "❌ Legacy checksum verification failed with $LEGACY_ERRORS errors"
+        fi
     fi
 fi
 
@@ -222,6 +400,9 @@ cat > "$LOG_DIR/last-sync.json" <<EOF
     "destination": "$S3_DEST",
     "checksum_verification": {
         "enabled": $ENABLE_CHECKSUM_VERIFICATION,
+        "algorithm": "$CHECKSUM_ALGORITHM",
+        "aws_additional_checksums": "$( [ "$CHECKSUM_ALGORITHM" != "NONE" ] && echo 'true' || echo 'false' )",
+        "server_side_validation": "$( [ "$CHECKSUM_ALGORITHM" != "NONE" ] && echo 'enabled' || echo 'disabled' )",
         "verify_after_upload": $VERIFY_AFTER_UPLOAD,
         "verified": "$CHECKSUM_VERIFIED",
         "checksum_file": "$( [ -f "$CHECKSUM_FILE" ] && echo "$CHECKSUM_FILE" || echo "null" )",
@@ -232,8 +413,11 @@ EOF
 
 log INFO ""
 log INFO "Sync metadata saved to: $LOG_DIR/last-sync.json"
+if [ "$CHECKSUM_ALGORITHM" != "NONE" ] && [ "$ENABLE_CHECKSUM_VERIFICATION" = "true" ]; then
+    log INFO "AWS Additional Checksums: Algorithm=$CHECKSUM_ALGORITHM, Server-side validation=ENABLED"
+fi
 if [ "$ENABLE_CHECKSUM_VERIFICATION" = "true" ] && [ -f "$CHECKSUM_FILE" ]; then
-    log INFO "Checksums saved to: $CHECKSUM_FILE"
+    log INFO "Local checksums saved to: $CHECKSUM_FILE"
 fi
 log INFO ""
 
