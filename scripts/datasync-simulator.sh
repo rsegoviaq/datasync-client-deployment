@@ -304,6 +304,14 @@ START_TIME=$(date +%s)
 # Get AWS checksum algorithm parameter
 AWS_CHECKSUM_PARAM=$(get_checksum_algorithm "$CHECKSUM_ALGORITHM")
 
+# Configure S3 transfer settings
+if [ -n "$S3_MAX_CONCURRENT_REQUESTS" ]; then
+    export AWS_MAX_CONCURRENT_REQUESTS="$S3_MAX_CONCURRENT_REQUESTS"
+    log INFO "S3 max concurrent requests: $S3_MAX_CONCURRENT_REQUESTS"
+else
+    log INFO "S3 max concurrent requests: 10 (AWS CLI default)"
+fi
+
 # Build sync command with checksum support
 SYNC_CMD="aws s3 sync \"$WATCH_DIR\" \"$S3_DEST\" \
     --storage-class INTELLIGENT_TIERING \

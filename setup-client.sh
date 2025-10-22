@@ -256,6 +256,38 @@ configure_s3() {
 }
 
 # ==============================================================================
+# S3 TRANSFER SETTINGS
+# ==============================================================================
+
+configure_s3_transfer() {
+    print_header "S3 Transfer Configuration"
+
+    echo "Configure AWS S3 transfer performance settings."
+    echo ""
+    print_info "Max Concurrent Requests - controls parallel upload performance"
+    print_info "  Default: 10  (good balance for most use cases)"
+    print_info "  Higher:  15-20 (better for many small files, may hit rate limits)"
+    print_info "  Lower:   5  (conservative, for limited bandwidth)"
+    echo ""
+
+    S3_MAX_CONCURRENT_REQUESTS=$(prompt_input "S3 max concurrent requests" "10")
+
+    # Validate input is a number
+    if ! [[ "$S3_MAX_CONCURRENT_REQUESTS" =~ ^[0-9]+$ ]]; then
+        print_warning "Invalid number, using default: 10"
+        S3_MAX_CONCURRENT_REQUESTS="10"
+    fi
+
+    # Warn if too high
+    if [ "$S3_MAX_CONCURRENT_REQUESTS" -gt 20 ]; then
+        print_warning "⚠ Values > 20 may cause AWS throttling. Recommended: 10-20"
+    fi
+
+    print_success "S3 max concurrent requests: $S3_MAX_CONCURRENT_REQUESTS"
+    echo ""
+}
+
+# ==============================================================================
 # LOCAL DIRECTORIES
 # ==============================================================================
 
@@ -400,6 +432,7 @@ generate_config() {
     sed -i "s|\[AWS_ACCOUNT_ID\]|$AWS_ACCOUNT_ID|g" "$config_file"
     sed -i "s|\[BUCKET_NAME\]|$BUCKET_NAME|g" "$config_file"
     sed -i "s|\[S3_SUBDIRECTORY\]|$S3_SUBDIRECTORY|g" "$config_file"
+    sed -i "s|\[S3_MAX_CONCURRENT_REQUESTS\]|$S3_MAX_CONCURRENT_REQUESTS|g" "$config_file"
     sed -i "s|\[DATASYNC_ROLE_ARN\]|$DATASYNC_ROLE_ARN|g" "$config_file"
     sed -i "s|\[IAM_ROLE_NAME\]|$IAM_ROLE_NAME|g" "$config_file"
     sed -i "s|\[LOG_GROUP\]|$LOG_GROUP|g" "$config_file"
@@ -1116,6 +1149,7 @@ main() {
 
     # S3 configuration (skipped for existing mode as it's handled above)
     configure_s3
+    configure_s3_transfer
     configure_directories
     configure_monitoring
 
