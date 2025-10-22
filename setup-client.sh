@@ -125,6 +125,38 @@ check_prerequisites() {
 }
 
 # ==============================================================================
+# INFRASTRUCTURE MODE SELECTION
+# ==============================================================================
+
+select_infrastructure_mode() {
+    print_header "Infrastructure Mode Selection"
+
+    echo "This wizard can either:"
+    echo "  1. Create new AWS infrastructure (S3 bucket, IAM roles, CloudWatch logs)"
+    echo "  2. Use existing AWS infrastructure (manual/Terraform/CloudFormation)"
+    echo ""
+
+    local mode_choice
+    while true; do
+        mode_choice=$(prompt_input "Select mode [1 for new, 2 for existing]" "1")
+
+        if [ "$mode_choice" = "1" ]; then
+            INFRASTRUCTURE_MODE="create"
+            print_success "Mode: Create new AWS infrastructure"
+            break
+        elif [ "$mode_choice" = "2" ]; then
+            INFRASTRUCTURE_MODE="existing"
+            print_success "Mode: Use existing AWS infrastructure"
+            break
+        else
+            print_error "Invalid choice. Please enter 1 or 2."
+        fi
+    done
+
+    echo ""
+}
+
+# ==============================================================================
 # COLLECT CLIENT INFORMATION
 # ==============================================================================
 
@@ -195,23 +227,30 @@ configure_aws() {
 configure_s3() {
     print_header "S3 Bucket Configuration"
 
-    # Generate bucket name
-    local date_suffix=$(date +%Y%m%d)
-    local suggested_bucket="datasync-${CLIENT_NAME}-${date_suffix}"
+    # Only ask for bucket if in create mode (existing mode already has it)
+    if [ "$INFRASTRUCTURE_MODE" != "existing" ]; then
+        # Generate bucket name
+        local date_suffix=$(date +%Y%m%d)
+        local suggested_bucket="datasync-${CLIENT_NAME}-${date_suffix}"
 
-    BUCKET_NAME=$(prompt_input "S3 bucket name" "$suggested_bucket")
+        BUCKET_NAME=$(prompt_input "S3 bucket name" "$suggested_bucket")
 
-    # Check if bucket exists
-    if aws s3 ls "s3://$BUCKET_NAME" --profile "$AWS_PROFILE" 2>/dev/null; then
-        print_warning "Bucket already exists: $BUCKET_NAME"
-        if ! prompt_yes_no "Use existing bucket?"; then
-            BUCKET_NAME=$(prompt_input "Enter different bucket name")
+        # Check if bucket exists
+        if aws s3 ls "s3://$BUCKET_NAME" --profile "$AWS_PROFILE" 2>/dev/null; then
+            print_warning "Bucket already exists: $BUCKET_NAME"
+            if ! prompt_yes_no "Use existing bucket?"; then
+                BUCKET_NAME=$(prompt_input "Enter different bucket name")
+            fi
         fi
-    fi
 
-    # S3 subdirectory
-    S3_SUBDIRECTORY=$(prompt_input "S3 subdirectory (path within bucket)" "datasync")
-    S3_SUBDIRECTORY="${S3_SUBDIRECTORY#/}"  # Remove leading slash
+        # S3 subdirectory
+        S3_SUBDIRECTORY=$(prompt_input "S3 subdirectory (path within bucket)" "datasync")
+        S3_SUBDIRECTORY="${S3_SUBDIRECTORY#/}"  # Remove leading slash
+    else
+        # In existing mode, just display what was configured
+        print_info "Using bucket: $BUCKET_NAME"
+        print_info "S3 path: $S3_SUBDIRECTORY"
+    fi
 
     echo ""
 }
@@ -328,12 +367,16 @@ generate_config() {
     local config_file="$DEPLOYMENT_DIR/config/${CLIENT_NAME}-config.env"
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
 
-    # IAM role name
-    IAM_ROLE_NAME="DataSyncRole-${CLIENT_NAME}"
+    # IAM role name (use existing if already set from configure_existing_infrastructure)
+    if [ -z "$IAM_ROLE_NAME" ]; then
+        IAM_ROLE_NAME="DataSyncRole-${CLIENT_NAME}"
+    fi
     DATASYNC_ROLE_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:role/${IAM_ROLE_NAME}"
 
-    # Log group
-    LOG_GROUP="/aws/datasync/${CLIENT_NAME}"
+    # Log group (use existing if already set)
+    if [ -z "$LOG_GROUP" ]; then
+        LOG_GROUP="/aws/datasync/${CLIENT_NAME}"
+    fi
     LOG_GROUP_ARN="arn:aws:logs:${AWS_REGION}:${AWS_ACCOUNT_ID}:log-group:${LOG_GROUP}"
 
     # SNS topic (if alerts enabled)
@@ -384,10 +427,175 @@ generate_config() {
 }
 
 # ==============================================================================
+# VALIDATE EXISTING AWS INFRASTRUCTURE
+# ==============================================================================
+
+validate_s3_bucket() {
+    local bucket_name="$1"
+    local profile="$2"
+    local region="$3"
+
+    print_info "Validating S3 bucket: $bucket_name"
+
+    # Check if bucket exists
+    if ! aws s3 ls "s3://$bucket_name" --profile "$profile" --region "$region" &>/dev/null; then
+        print_error "Bucket does not exist: $bucket_name"
+        return 1
+    fi
+    print_success "✓ Bucket exists"
+
+    # Check versioning status
+    local versioning=$(aws s3api get-bucket-versioning \
+        --bucket "$bucket_name" \
+        --profile "$profile" \
+        --region "$region" \
+        --query 'Status' \
+        --output text 2>/dev/null)
+
+    if [ "$versioning" = "Enabled" ]; then
+        print_success "✓ Versioning enabled"
+    else
+        print_warning "⚠ Versioning not enabled (recommended for data protection)"
+    fi
+
+    # Check encryption
+    if aws s3api get-bucket-encryption \
+        --bucket "$bucket_name" \
+        --profile "$profile" \
+        --region "$region" &>/dev/null; then
+        print_success "✓ Encryption enabled"
+    else
+        print_warning "⚠ Encryption not enabled (recommended for security)"
+    fi
+
+    echo ""
+    return 0
+}
+
+validate_iam_role() {
+    local role_name="$1"
+    local bucket_name="$2"
+    local profile="$3"
+
+    print_info "Validating IAM role: $role_name"
+
+    # Check if role exists
+    if ! aws iam get-role --role-name "$role_name" --profile "$profile" &>/dev/null; then
+        print_error "IAM role does not exist: $role_name"
+        return 1
+    fi
+    print_success "✓ IAM role exists"
+
+    # Check role policies
+    local policies=$(aws iam list-role-policies \
+        --role-name "$role_name" \
+        --profile "$profile" \
+        --query 'PolicyNames' \
+        --output text 2>/dev/null)
+
+    if [ -n "$policies" ]; then
+        print_success "✓ Role has inline policies: $policies"
+    else
+        print_warning "⚠ No inline policies found on role"
+    fi
+
+    # Check attached managed policies
+    local attached=$(aws iam list-attached-role-policies \
+        --role-name "$role_name" \
+        --profile "$profile" \
+        --query 'AttachedPolicies[].PolicyName' \
+        --output text 2>/dev/null)
+
+    if [ -n "$attached" ]; then
+        print_success "✓ Role has attached policies: $attached"
+    fi
+
+    echo ""
+    return 0
+}
+
+validate_cloudwatch_logs() {
+    local log_group="$1"
+    local profile="$2"
+    local region="$3"
+
+    print_info "Checking CloudWatch log group: $log_group (optional)"
+
+    if aws logs describe-log-groups \
+        --log-group-name-prefix "$log_group" \
+        --profile "$profile" \
+        --region "$region" 2>/dev/null | grep -q "$log_group"; then
+        print_success "✓ Log group exists"
+        return 0
+    else
+        print_warning "⚠ Log group does not exist (optional - for DataSync agent mode)"
+        return 1
+    fi
+
+    echo ""
+}
+
+configure_existing_infrastructure() {
+    print_header "Configure Existing AWS Infrastructure"
+
+    print_info "This mode validates existing AWS resources and generates configuration."
+    print_info "Required resources: S3 bucket, IAM role with S3 permissions"
+    print_info "Optional resources: CloudWatch log group"
+    echo ""
+
+    # Prompt for bucket name and validate
+    while true; do
+        BUCKET_NAME=$(prompt_input "S3 bucket name")
+
+        if validate_s3_bucket "$BUCKET_NAME" "$AWS_PROFILE" "$AWS_REGION"; then
+            break
+        else
+            print_error "Bucket validation failed. Please try again."
+            echo ""
+        fi
+    done
+
+    # S3 subdirectory
+    S3_SUBDIRECTORY=$(prompt_input "S3 subdirectory (path within bucket)" "datasync")
+    S3_SUBDIRECTORY="${S3_SUBDIRECTORY#/}"  # Remove leading slash
+    echo ""
+
+    # Prompt for IAM role and validate
+    print_info "IAM role should have permissions for S3 bucket: $BUCKET_NAME"
+    local default_role="DataSyncRole-${CLIENT_NAME}"
+
+    while true; do
+        IAM_ROLE_NAME=$(prompt_input "IAM role name" "$default_role")
+
+        if validate_iam_role "$IAM_ROLE_NAME" "$BUCKET_NAME" "$AWS_PROFILE"; then
+            break
+        else
+            if prompt_yes_no "IAM role validation failed. Continue anyway?" "n"; then
+                print_warning "Continuing with unvalidated IAM role: $IAM_ROLE_NAME"
+                break
+            fi
+            echo ""
+        fi
+    done
+
+    # CloudWatch log group (optional)
+    LOG_GROUP="/aws/datasync/${CLIENT_NAME}"
+    validate_cloudwatch_logs "$LOG_GROUP" "$AWS_PROFILE" "$AWS_REGION"
+
+    echo ""
+}
+
+# ==============================================================================
 # CREATE AWS INFRASTRUCTURE
 # ==============================================================================
 
 create_aws_infrastructure() {
+    # Skip if using existing infrastructure
+    if [ "$INFRASTRUCTURE_MODE" = "existing" ]; then
+        print_info "Skipping AWS infrastructure creation (using existing resources)"
+        return 0
+    fi
+
     print_header "AWS Infrastructure Setup"
 
     if ! prompt_yes_no "Create AWS infrastructure now?" "y"; then
@@ -808,6 +1016,8 @@ print_summary() {
 
     cat <<SUMMARY
 
+Infrastructure Mode: $INFRASTRUCTURE_MODE
+
 Client Information:
   Name: $CLIENT_NAME
   Contact: $CLIENT_CONTACT
@@ -822,6 +1032,13 @@ S3 Configuration:
   Bucket: $BUCKET_NAME
   Path: $S3_SUBDIRECTORY
   Storage Class: INTELLIGENT_TIERING
+
+IAM Configuration:
+  Role Name: $IAM_ROLE_NAME
+  Role ARN: $DATASYNC_ROLE_ARN
+
+CloudWatch Logs:
+  Log Group: $LOG_GROUP
 
 Local Directories:
   Home: $DATASYNC_HOME
@@ -847,13 +1064,25 @@ SUMMARY
         echo ""
     fi
 
+    if [ "$INFRASTRUCTURE_MODE" = "existing" ]; then
+        print_info "✓ Using existing AWS infrastructure - no resources were created"
+        echo ""
+    fi
+
     print_success "Client setup complete!"
     echo ""
 
     print_info "Next steps:"
     echo "  1. Review configuration: cat $CONFIG_FILE"
-    echo "  2. Transfer package to client: scp packages/${CLIENT_NAME}-deployment.tar.gz client:"
-    echo "  3. On client machine: tar -xzf ${CLIENT_NAME}-deployment.tar.gz && cd ${CLIENT_NAME}-deployment && ./install.sh"
+    if [ "$INFRASTRUCTURE_MODE" = "existing" ]; then
+        echo "  2. Verify IAM role permissions for bucket: $BUCKET_NAME"
+        echo "     Required: s3:GetObject, s3:PutObject, s3:ListBucket, s3:DeleteObject"
+        echo "  3. Transfer package to client: scp packages/${CLIENT_NAME}-deployment.tar.gz client:"
+        echo "  4. On client machine: tar -xzf ${CLIENT_NAME}-deployment.tar.gz && cd ${CLIENT_NAME}-deployment && ./install.sh"
+    else
+        echo "  2. Transfer package to client: scp packages/${CLIENT_NAME}-deployment.tar.gz client:"
+        echo "  3. On client machine: tar -xzf ${CLIENT_NAME}-deployment.tar.gz && cd ${CLIENT_NAME}-deployment && ./install.sh"
+    fi
     echo ""
 }
 
@@ -872,9 +1101,20 @@ main() {
     # Check prerequisites
     check_prerequisites || exit 1
 
+    # Select infrastructure mode
+    select_infrastructure_mode
+
     # Collect information
     collect_client_info "$1"
     configure_aws || exit 1
+
+    # Configure based on mode
+    if [ "$INFRASTRUCTURE_MODE" = "existing" ]; then
+        # Use existing infrastructure - validate resources
+        configure_existing_infrastructure
+    fi
+
+    # S3 configuration (skipped for existing mode as it's handled above)
     configure_s3
     configure_directories
     configure_monitoring
@@ -882,7 +1122,7 @@ main() {
     # Generate configuration
     generate_config
 
-    # Create AWS infrastructure
+    # Create AWS infrastructure (skipped if using existing)
     create_aws_infrastructure
 
     # Generate deployment package
