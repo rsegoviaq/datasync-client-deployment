@@ -2,18 +2,22 @@
 # Verify S3 files against stored checksums
 # Can verify against a specific checksum file or the most recent one
 
-# Load configuration
-if [ -f ~/datasync-config.env ]; then
-    source ~/datasync-config.env
+# Load configuration (look in deployment folder, relative to script location)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_FILE="${SCRIPT_DIR}/../datasync-config.env"
+
+if [ -f "$CONFIG_FILE" ]; then
+    source "$CONFIG_FILE"
 else
-    echo "❌ Configuration file not found: ~/datasync-config.env"
+    echo "❌ Configuration file not found: $CONFIG_FILE"
+    echo "Expected location: deployment_folder/datasync-config.env"
     exit 1
 fi
 
 # Script configuration
-LOG_DIR="${LOGS_DIR:-$HOME/datasync-test/logs}"
+LOG_DIR="$LOGS_DIR"
 CHECKSUM_DIR="$LOG_DIR/checksums"
-S3_DEST="s3://$BUCKET_NAME/datasync-test/"
+S3_DEST="s3://$BUCKET_NAME/$S3_SUBDIRECTORY/"
 
 # Colors
 GREEN='\033[0;32m'

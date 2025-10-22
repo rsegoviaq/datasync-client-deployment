@@ -1,7 +1,17 @@
 #!/bin/bash
 # Check status of DataSync simulation
 
-source ~/datasync-config.env
+# Load configuration (look in deployment folder, relative to script location)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_FILE="${SCRIPT_DIR}/../datasync-config.env"
+
+if [ -f "$CONFIG_FILE" ]; then
+    source "$CONFIG_FILE"
+else
+    echo "❌ Configuration file not found: $CONFIG_FILE"
+    echo "Expected location: deployment_folder/datasync-config.env"
+    exit 1
+fi
 
 echo "╔════════════════════════════════════════════════════════════╗"
 echo "║         DataSync Simulation - Status Check                ║"
@@ -39,10 +49,10 @@ fi
 echo ""
 echo "S3 Destination:"
 echo "──────────────"
-S3_PATH="s3://$BUCKET_NAME/datasync-test/"
+S3_PATH="s3://$BUCKET_NAME/$S3_SUBDIRECTORY/"
 S3_COUNT=$(aws s3 ls "$S3_PATH" --recursive --profile "$AWS_PROFILE" 2>/dev/null | wc -l)
 echo "  Bucket: $BUCKET_NAME"
-echo "  Path: datasync-test/"
+echo "  Path: $S3_SUBDIRECTORY/"
 echo "  Objects: $S3_COUNT"
 
 echo ""

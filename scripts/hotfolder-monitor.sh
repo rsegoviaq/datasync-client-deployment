@@ -2,16 +2,20 @@
 # Hot Folder Monitor - Watches for file changes and triggers sync
 # Simulates DataSync hot folder behavior
 
-# Load configuration
-if [ -f ~/datasync-config.env ]; then
-    source ~/datasync-config.env
+# Load configuration (look in deployment folder, relative to script location)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_FILE="${SCRIPT_DIR}/../datasync-config.env"
+
+if [ -f "$CONFIG_FILE" ]; then
+    source "$CONFIG_FILE"
 else
-    echo "❌ Configuration file not found: ~/datasync-config.env"
+    echo "❌ Configuration file not found: $CONFIG_FILE"
+    echo "Expected location: deployment_folder/datasync-config.env"
     exit 1
 fi
 
 # Configuration
-WATCH_DIR="${SOURCE_DIR:-$HOME/datasync-test/source}"
+WATCH_DIR="$SOURCE_DIR"
 CHECK_INTERVAL=30  # Check every 30 seconds
 LOG_FILE="$LOGS_DIR/monitor-$(date +%Y%m%d).log"
 SYNC_SCRIPT="$SCRIPTS_DIR/datasync-simulator.sh"

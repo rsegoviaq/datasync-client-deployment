@@ -674,11 +674,11 @@ chmod +x "$SCRIPTS_DIR"/*.sh
 echo "✓ Scripts installed"
 echo ""
 
-# Copy configuration
+# Copy configuration to deployment folder (self-contained)
 echo "Installing configuration..."
-cp "$SCRIPT_DIR/config/datasync-config.env" "$HOME/datasync-config.env"
+cp "$SCRIPT_DIR/config/datasync-config.env" "$DATASYNC_HOME/datasync-config.env"
 
-echo "✓ Configuration installed to: $HOME/datasync-config.env"
+echo "✓ Configuration installed to: $DATASYNC_HOME/datasync-config.env"
 echo ""
 
 # Test AWS connectivity
@@ -702,7 +702,7 @@ echo "Installation Complete!"
 echo "==============================================="
 echo ""
 echo "Next steps:"
-echo "1. Source configuration: source ~/datasync-config.env"
+echo "1. Source configuration: source $DATASYNC_HOME/datasync-config.env"
 echo "2. Start monitor: cd $SCRIPTS_DIR && ./start-monitor.sh"
 echo "3. Or manual sync: cd $SCRIPTS_DIR && ./sync-now.sh"
 echo ""

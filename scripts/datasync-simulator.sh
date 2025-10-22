@@ -14,18 +14,22 @@
 #   - SHA256: ~7+ minutes for 100GB files
 #   - Verification without downloads using 'aws s3api head-object'
 
-# Load configuration
-if [ -f ~/datasync-config.env ]; then
-    source ~/datasync-config.env
+# Load configuration (look in deployment folder, relative to script location)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_FILE="${SCRIPT_DIR}/../datasync-config.env"
+
+if [ -f "$CONFIG_FILE" ]; then
+    source "$CONFIG_FILE"
 else
-    echo "❌ Configuration file not found: ~/datasync-config.env"
+    echo "❌ Configuration file not found: $CONFIG_FILE"
+    echo "Expected location: deployment_folder/datasync-config.env"
     exit 1
 fi
 
-# Script configuration
-WATCH_DIR="${SOURCE_DIR:-$HOME/datasync-test/source}"
-S3_DEST="s3://$BUCKET_NAME/datasync-test/"
-LOG_DIR="${LOGS_DIR:-$HOME/datasync-test/logs}"
+# Script configuration - all values come from config file
+WATCH_DIR="$SOURCE_DIR"
+S3_DEST="s3://$BUCKET_NAME/$S3_SUBDIRECTORY/"
+LOG_DIR="$LOGS_DIR"
 LOG_FILE="$LOG_DIR/sync-$(date +%Y%m%d).log"
 CHECKSUM_DIR="$LOG_DIR/checksums"
 CHECKSUM_FILE="$CHECKSUM_DIR/checksums-$(date +%Y%m%d-%H%M%S).txt"
@@ -134,18 +138,18 @@ verify_s3_checksums_aws() {
     log INFO "Verifying S3 object checksums using AWS Additional Checksums API..."
     log INFO "Algorithm: $CHECKSUM_ALGORITHM (no downloads required)"
 
-    # Get list of objects in S3
+    # Get list of objects in S3 (using JSON for reliable parsing)
     local object_list=$(mktemp)
     aws s3api list-objects-v2 \
         --bucket "$BUCKET_NAME" \
         --prefix "$(echo "$s3_prefix" | sed 's|s3://[^/]*/||')" \
         --query 'Contents[].Key' \
-        --output text \
+        --output json \
         --profile "$AWS_PROFILE" \
-        --region "$AWS_REGION" > "$object_list"
+        --region "$AWS_REGION" | jq -r '.[]' > "$object_list"
 
     # Check each object's checksum
-    while read -r object_key; do
+    while IFS= read -r object_key; do
         [ -z "$object_key" ] && continue
 
         # Retrieve object metadata with checksum

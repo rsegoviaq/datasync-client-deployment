@@ -4,6 +4,12 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MONITOR_SCRIPT="$SCRIPT_DIR/hotfolder-monitor.sh"
 
+# Load config for log path
+CONFIG_FILE="${SCRIPT_DIR}/../datasync-config.env"
+if [ -f "$CONFIG_FILE" ]; then
+    source "$CONFIG_FILE"
+fi
+
 # Check if already running
 if pgrep -f "hotfolder-monitor.sh" > /dev/null; then
     echo "⚠️  Monitor is already running"
@@ -31,7 +37,7 @@ if ps -p $MONITOR_PID > /dev/null; then
     echo "Commands:"
     echo "  • Stop monitor:    ./stop-monitor.sh"
     echo "  • Check status:    ./check-status.sh"
-    echo "  • View logs:       tail -f ~/datasync-test/logs/monitor-$(date +%Y%m%d).log"
+    echo "  • View logs:       tail -f ${LOGS_DIR:-logs}/monitor-$(date +%Y%m%d).log"
     echo ""
 else
     echo "❌ Failed to start monitor"
