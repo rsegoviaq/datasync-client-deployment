@@ -580,7 +580,7 @@ configure_existing_infrastructure() {
 
     # CloudWatch log group (optional)
     LOG_GROUP="/aws/datasync/${CLIENT_NAME}"
-    validate_cloudwatch_logs "$LOG_GROUP" "$AWS_PROFILE" "$AWS_REGION"
+    validate_cloudwatch_logs "$LOG_GROUP" "$AWS_PROFILE" "$AWS_REGION" || true
 
     echo ""
 }
