@@ -256,6 +256,57 @@ configure_s3() {
 }
 
 # ==============================================================================
+# S3 TRANSFER SETTINGS
+# ==============================================================================
+
+configure_s3_transfer() {
+    print_header "S3 Transfer Performance Optimization"
+
+    echo "AWS CLI transfer settings control upload/download speed."
+    echo "Higher values improve throughput but use more CPU/memory."
+    echo ""
+    echo -e "${YELLOW}Network Bandwidth Recommendations:${NC}"
+    echo "  < 1 Gbps:  10 concurrent requests, 8-16MB chunks (conservative)"
+    echo "  1-3 Gbps:  20 concurrent requests, 64MB chunks (recommended for you)"
+    echo "  > 3 Gbps:  30 concurrent requests, 128MB chunks (maximum)"
+    echo ""
+
+    # Legacy variable for backward compatibility
+    S3_MAX_CONCURRENT_REQUESTS=$(prompt_input "Enter max concurrent S3 requests" "20")
+
+    # Validate input is a number
+    if ! [[ "$S3_MAX_CONCURRENT_REQUESTS" =~ ^[0-9]+$ ]]; then
+        print_warning "Invalid number, using default: 20"
+        S3_MAX_CONCURRENT_REQUESTS="20"
+    fi
+
+    # Warn if too high
+    if [ "$S3_MAX_CONCURRENT_REQUESTS" -gt 30 ]; then
+        print_warning "⚠ Values > 30 may cause AWS throttling. Recommended: 10-30"
+    fi
+
+    # New optimized variables
+    AWS_CLI_S3_MAX_CONCURRENT_REQUESTS="$S3_MAX_CONCURRENT_REQUESTS"
+
+    read -p "Enter multipart upload threshold [default: 64MB]: " S3_THRESHOLD
+    AWS_CLI_S3_MULTIPART_THRESHOLD="${S3_THRESHOLD:-64MB}"
+
+    read -p "Enter multipart chunk size [default: 64MB]: " S3_CHUNK
+    AWS_CLI_S3_MULTIPART_CHUNKSIZE="${S3_CHUNK:-64MB}"
+
+    read -p "Limit max bandwidth (leave empty for unlimited) [default: ]: " S3_BANDWIDTH
+    AWS_CLI_S3_MAX_BANDWIDTH="${S3_BANDWIDTH:-}"
+
+    echo ""
+    print_success "Transfer settings configured"
+    echo "  Max concurrent requests: $AWS_CLI_S3_MAX_CONCURRENT_REQUESTS"
+    echo "  Multipart threshold: $AWS_CLI_S3_MULTIPART_THRESHOLD"
+    echo "  Multipart chunk size: $AWS_CLI_S3_MULTIPART_CHUNKSIZE"
+    echo "  Max bandwidth: ${AWS_CLI_S3_MAX_BANDWIDTH:-unlimited}"
+    echo ""
+}
+
+# ==============================================================================
 # LOCAL DIRECTORIES
 # ==============================================================================
 
@@ -400,6 +451,11 @@ generate_config() {
     sed -i "s|\[AWS_ACCOUNT_ID\]|$AWS_ACCOUNT_ID|g" "$config_file"
     sed -i "s|\[BUCKET_NAME\]|$BUCKET_NAME|g" "$config_file"
     sed -i "s|\[S3_SUBDIRECTORY\]|$S3_SUBDIRECTORY|g" "$config_file"
+    sed -i "s|\[S3_MAX_CONCURRENT_REQUESTS\]|$S3_MAX_CONCURRENT_REQUESTS|g" "$config_file"
+    sed -i "s|\[AWS_CLI_S3_MAX_CONCURRENT_REQUESTS\]|$AWS_CLI_S3_MAX_CONCURRENT_REQUESTS|g" "$config_file"
+    sed -i "s|\[AWS_CLI_S3_MULTIPART_THRESHOLD\]|$AWS_CLI_S3_MULTIPART_THRESHOLD|g" "$config_file"
+    sed -i "s|\[AWS_CLI_S3_MULTIPART_CHUNKSIZE\]|$AWS_CLI_S3_MULTIPART_CHUNKSIZE|g" "$config_file"
+    sed -i "s|\[AWS_CLI_S3_MAX_BANDWIDTH\]|$AWS_CLI_S3_MAX_BANDWIDTH|g" "$config_file"
     sed -i "s|\[DATASYNC_ROLE_ARN\]|$DATASYNC_ROLE_ARN|g" "$config_file"
     sed -i "s|\[IAM_ROLE_NAME\]|$IAM_ROLE_NAME|g" "$config_file"
     sed -i "s|\[LOG_GROUP\]|$LOG_GROUP|g" "$config_file"
@@ -1116,6 +1172,7 @@ main() {
 
     # S3 configuration (skipped for existing mode as it's handled above)
     configure_s3
+    configure_s3_transfer
     configure_directories
     configure_monitoring
 

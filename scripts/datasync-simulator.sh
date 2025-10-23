@@ -304,6 +304,43 @@ START_TIME=$(date +%s)
 # Get AWS checksum algorithm parameter
 AWS_CHECKSUM_PARAM=$(get_checksum_algorithm "$CHECKSUM_ALGORITHM")
 
+# Configure S3 transfer settings (legacy variable)
+if [ -n "$S3_MAX_CONCURRENT_REQUESTS" ]; then
+    export AWS_MAX_CONCURRENT_REQUESTS="$S3_MAX_CONCURRENT_REQUESTS"
+    log INFO "S3 max concurrent requests: $S3_MAX_CONCURRENT_REQUESTS (legacy setting)"
+fi
+
+# Configure S3 transfer optimization settings (new variables)
+if [ -n "$AWS_CLI_S3_MAX_CONCURRENT_REQUESTS" ]; then
+    export AWS_MAX_CONCURRENT_REQUESTS="$AWS_CLI_S3_MAX_CONCURRENT_REQUESTS"
+    log INFO "S3 max concurrent requests: $AWS_CLI_S3_MAX_CONCURRENT_REQUESTS"
+else
+    log INFO "S3 max concurrent requests: 10 (AWS CLI default)"
+fi
+
+if [ -n "$AWS_CLI_S3_MULTIPART_THRESHOLD" ]; then
+    log INFO "S3 multipart threshold: $AWS_CLI_S3_MULTIPART_THRESHOLD"
+fi
+
+if [ -n "$AWS_CLI_S3_MULTIPART_CHUNKSIZE" ]; then
+    log INFO "S3 multipart chunk size: $AWS_CLI_S3_MULTIPART_CHUNKSIZE"
+fi
+
+if [ -n "$AWS_CLI_S3_MAX_BANDWIDTH" ]; then
+    log INFO "S3 max bandwidth: $AWS_CLI_S3_MAX_BANDWIDTH"
+fi
+
+# Apply AWS CLI configuration via aws configure set (persistent)
+if [ -n "$AWS_CLI_S3_MULTIPART_THRESHOLD" ]; then
+    aws configure set default.s3.multipart_threshold "$AWS_CLI_S3_MULTIPART_THRESHOLD" --profile "$AWS_PROFILE" 2>/dev/null || true
+fi
+if [ -n "$AWS_CLI_S3_MULTIPART_CHUNKSIZE" ]; then
+    aws configure set default.s3.multipart_chunksize "$AWS_CLI_S3_MULTIPART_CHUNKSIZE" --profile "$AWS_PROFILE" 2>/dev/null || true
+fi
+if [ -n "$AWS_CLI_S3_MAX_BANDWIDTH" ] && [ "$AWS_CLI_S3_MAX_BANDWIDTH" != "" ]; then
+    aws configure set default.s3.max_bandwidth "$AWS_CLI_S3_MAX_BANDWIDTH" --profile "$AWS_PROFILE" 2>/dev/null || true
+fi
+
 # Build sync command with checksum support
 SYNC_CMD="aws s3 sync \"$WATCH_DIR\" \"$S3_DEST\" \
     --storage-class INTELLIGENT_TIERING \
